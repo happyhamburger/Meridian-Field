@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rapid 10 Chess</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#302e2b;color:#fff;font-family:"Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+       min-height:100vh;display:flex;justify-content:center;align-items:center;user-select:none}
+  #wrap{--sz:min(94vw,calc(100vh - 150px),720px);width:var(--sz)}
+  .bar{display:flex;align-items:center;justify-content:space-between;height:52px}
+  .who{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px}
+  .avatar{width:38px;height:38px;border-radius:3px;background:#4b4847;display:flex;align-items:center;
+          justify-content:center;font-size:24px;color:#9e9b98}
+  .clock{min-width:120px;text-align:right;padding:6px 12px;border-radius:4px;background:#262421;
+         color:#989795;font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+  .clock.active{background:#fff;color:#262421}
+  .clock.low.active{background:#e02828;color:#fff}
+  #board{width:var(--sz);height:var(--sz);display:grid;grid-template-columns:repeat(8,1fr);
+         grid-template-rows:repeat(8,1fr);border-radius:3px;overflow:hidden;position:relative}
+  .sq{position:relative;display:flex;align-items:center;justify-content:center}
+  .light{background:#ebecd0}.dark{background:#739552}
+  .light.hl{background:#f5f682}.dark.hl{background:#b9ca43}
+  .light.sel{background:#f5f682}.dark.sel{background:#b9ca43}
+  .check{background:radial-gradient(circle,#ff0000 0%,#e7000088 40%,transparent 75%) !important}
+  .coord{position:absolute;font-size:calc(var(--sz)/50);font-weight:700;pointer-events:none}
+  .coord.r{top:3px;left:4px}.coord.f{bottom:2px;right:4px}
+  .light .coord{color:#739552}.dark .coord{color:#ebecd0}
+  .pc{font-size:calc(var(--sz)/9.2);line-height:1;cursor:grab;z-index:2;
+      font-family:"Segoe UI Symbol","DejaVu Sans","Noto Sans Symbols2",serif}
+  .pc.w{color:#fff;-webkit-text-stroke:1.2px #3a3a3a;text-shadow:0 2px 2px rgba(0,0,0,.25)}
+  .pc.b{color:#2b2b2b;-webkit-text-stroke:1px #000;text-shadow:0 2px 2px rgba(0,0,0,.25)}
+  .dot::after{content:"";position:absolute;width:30%;height:30%;border-radius:50%;background:rgba(0,0,0,.14)}
+  .ring::after{content:"";position:absolute;inset:0;border-radius:50%;border:calc(var(--sz)/110) solid rgba(0,0,0,.14)}
+  #foot{display:flex;justify-content:space-between;align-items:center;margin-top:10px;gap:10px}
+  #status{color:#c3c2c1;font-size:14px}
+  button{background:#81b64c;color:#fff;border:0;border-radius:6px;padding:9px 16px;font-weight:700;
+         font-size:14px;cursor:pointer;box-shadow:0 4px 0 #45753c}
+  button:hover{background:#a3d160}
+  button.grey{background:#454341;box-shadow:0 4px 0 #2b2927}
+  #modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:9}
+  #modal .box{background:#262421;border-radius:10px;padding:28px 34px;text-align:center;min-width:260px}
+  #modal h2{font-size:26px;margin-bottom:6px}#modal p{color:#c3c2c1;margin-bottom:20px}
+  #searching{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;z-index:5;
+             background:rgba(0,0,0,.35);font-weight:700;font-size:18px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div class="bar"><div class="who"><div class="avatar">♟&#xFE0E;</div><span id="oppName">Searching…</span></div><div class="clock" id="oppClock">10:00</div></div>
+  <div id="board"></div>
+  <div class="bar"><div class="who"><div class="avatar">♟&#xFE0E;</div><span>You</span></div><div class="clock" id="myClock">10:00</div></div>
+  <div id="foot"><span id="status">Looking for an opponent…</span><button class="grey" id="resign">Resign</button></div>
+</div>
+<div id="modal"><div class="box"><h2 id="mTitle"></h2><p id="mText"></p><button onclick="location.reload()">New 10 min</button></div></div>
+
+<script>
+const PREFIX = 'rapid10-chess-v1-slot-', SLOTS = 15, START = 10 * 60 * 1000;
+const GLYPH = {p:'♟',r:'♜',n:'♞',b:'♝',q:'♛',k:'♚'};
+const boardEl = document.getElementById('board');
+let game = new Chess(), myColor = 'w', conn = null, playing = false, over = false, matching = false;
+let guestPeer, hostPeer, mySlot = -1, selected = null, lastMove = null;
+let times = {w: START, b: START}, turnStart = Date.now();
+
+const $ = id => document.getElementById(id);
+const setStatus = t => $('status').textContent = t;
+
+/* ---------------- Board ---------------- */
+function render() {
+  boardEl.innerHTML = '';
+  const files = 'abcdefgh';
+  const legal = selected ? game.moves({square: selected, verbose: true}) : [];
+  let checkSq = null;
+  if (game.in_check()) {
+    const b = game.board();
+    for (let r = 0; r < 8; r++) for (let f = 0; f < 8; f++) {
+      const p = b[r][f]; if (p && p.type === 'k' && p.color === game.turn()) checkSq = files[f] + (8 - r);
+    }
+  }
+  for (let row = 0; row < 8; row++) for (let col = 0; col < 8; col++) {
+    const f = myColor === 'w' ? col : 7 - col, r = myColor === 'w' ? 7 - row : row;
+    const sqName = files[f] + (r + 1);
+    const d = document.createElement('div');
+    d.className = 'sq ' + ((f + r) % 2 ? 'light' : 'dark');
+    if (lastMove && (lastMove.from === sqName || lastMove.to === sqName)) d.classList.add('hl');
+    if (selected === sqName) d.classList.add('sel');
+    if (checkSq === sqName) d.classList.add('check');
+    const lm = legal.find(m => m.to === sqName);
+    if (lm) d.classList.add(game.get(sqName) ? 'ring' : 'dot');
+    if (col === 0) d.insertAdjacentHTML('beforeend', `<span class="coord r">${r + 1}</span>`);
+    if (row === 7) d.insertAdjacentHTML('beforeend', `<span class="coord f">${files[f]}</span>`);
+    const p = game.get(sqName);
+    if (p) {
+      const s = document.createElement('span');
+      s.className = 'pc ' + p.color;
+      s.textContent = GLYPH[p.type] + '\uFE0E';
+      if (p.color === myColor) {
+        s.draggable = true;
+        s.addEventListener('dragstart', e => { if (!canMove()) return e.preventDefault(); selected = sqName; e.dataTransfer.setData('text', sqName); setTimeout(render, 0); });
+      }
+      d.appendChild(s);
+    }
+    d.addEventListener('click', () => clickSq(sqName));
+    d.addEventListener('dragover', e => e.preventDefault());
+    d.addEventListener('drop', e => { e.preventDefault(); const from = e.dataTransfer.getData('text'); if (from) tryMove(from, sqName); });
+    boardEl.appendChild(d);
+  }
+  if (!playing) boardEl.insertAdjacentHTML('beforeend', '<div id="searching">Searching for opponent…</div>');
+}
+
+const canMove = () => playing && !over && game.turn() === myColor;
+
+function clickSq(sq) {
+  if (!canMove()) return;
+  const p = game.get(sq);
+  if (selected && selected !== sq && tryMove(selected, sq)) return;
+  selected = (p && p.color === myColor && selected !== sq) ? sq : null;
+  render();
+}
+
+function tryMove(from, to) {
+  if (!canMove()) return false;
+  const m = game.move({from, to, promotion: 'q'});
+  selected = null;
+  if (!m) { render(); return false; }
+  const now = Date.now();
+  times[myColor] -= now - turnStart; turnStart = now;
+  lastMove = {from, to};
+  conn.send({type: 'move', from, to, w: times.w, b: times.b});
+  render(); checkEnd();
+  return true;
+}
+
+/* ---------------- Clocks ---------------- */
+const remaining = c => times[c] - (playing && !over && game.turn() === c ? Date.now() - turnStart : 0);
+function fmt(ms) {
+  ms = Math.max(0, ms);
+  const s = Math.floor(ms / 1000);
+  return ms < 20000 ? `0:${String(s).padStart(2, '0')}.${Math.floor(ms % 1000 / 100)}` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+setInterval(() => {
+  const opp = myColor === 'w' ? 'b' : 'w';
+  const mine = remaining(myColor), theirs = remaining(opp);
+  $('myClock').textContent = fmt(mine); $('oppClock').textContent = fmt(theirs);
+  $('myClock').className = 'clock' + (playing && !over && game.turn() === myColor ? ' active' : '') + (mine < 20000 ? ' low' : '');
+  $('oppClock').className = 'clock' + (playing && !over && game.turn() === opp ? ' active' : '') + (theirs < 20000 ? ' low' : '');
+  if (!playing || over) return;
+  if (mine <= 0 && game.turn() === myColor) { conn.send({type: 'flag'}); finish('You lost', 'on time'); }
+  if (theirs < -2000 && game.turn() === opp) finish('You won', 'on time');
+}, 100);
+
+/* ---------------- Game end ---------------- */
+function checkEnd() {
+  if (game.in_checkmate()) finish(game.turn() === myColor ? 'You lost' : 'You won', 'by checkmate');
+  else if (game.in_stalemate()) finish('Draw', 'by stalemate');
+  else if (game.in_threefold_repetition()) finish('Draw', 'by repetition');
+  else if (game.insufficient_material()) finish('Draw', 'insufficient material');
+  else if (game.in_draw()) finish('Draw', '50-move rule');
+}
+function finish(title, text) {
+  if (over) return;
+  over = true;
+  $('mTitle').textContent = title; $('mText').textContent = text;
+  $('modal').style.display = 'flex';
+  setStatus('Game over');
+}
+$('resign').onclick = () => {
+  if (!playing || over) return location.reload();
+  if (!confirm('Resign this game?')) return;
+  conn.send({type: 'resign'}); finish('You lost', 'by resignation');
+};
+
+/* ---------------- Matchmaking (PeerJS) ---------------- */
+function beginGame(c, color) {
+  if (playing) return;
+  playing = true; matching = false; conn = c; myColor = color;
+  game = new Chess(); times = {w: START, b: START}; turnStart = Date.now();
+  $('oppName').textContent = 'Opponent';
+  setStatus(`You are ${color === 'w' ? 'White' : 'Black'} · 10 min`);
+  c.on('data', d => {
+    if (over) return;
+    if (d.type === 'move') {
+      game.move({from: d.from, to: d.to, promotion: 'q'});
+      lastMove = {from: d.from, to: d.to};
+      times.w = d.w; times.b = d.b; turnStart = Date.now();
+      render(); checkEnd();
+    } else if (d.type === 'resign') finish('You won', 'opponent resigned');
+    else if (d.type === 'flag') finish('You won', 'on time');
+  });
+  c.on('close', () => { if (!over) finish('You won', 'opponent left'); });
+  // free our lobby ID while keeping the game connection alive
+  setTimeout(() => { try { hostPeer && hostPeer.disconnect(); } catch (e) {} try { guestPeer && guestPeer.disconnect(); } catch (e) {} }, 1000);
+  render();
+}
+
+let pending = null;
+function tryHost(i) {
+  return new Promise(res => {
+    const c = guestPeer.connect(PREFIX + i, {reliable: true});
+    let done = false;
+    const end = v => { if (done) return; done = true; clearTimeout(t); pending = null; if (!v) try { c.close(); } catch (e) {} res(v); };
+    const t = setTimeout(() => end(null), 3500);
+    pending = {fail: () => end(null)};
+    c.on('open', () => c.send({type: 'join'}));
+    c.on('data', d => { if (d.type === 'accept') { c._color = d.color; end(c); } else if (d.type === 'busy') end(null); });
+  });
+}
+
+async function scan(upTo) {
+  for (let i = 0; i < upTo; i++) {
+    if (playing) return true;
+    if (i === mySlot) continue;
+    const c = await tryHost(i);
+    if (c) { beginGame(c, c._color); return true; }
+  }
+  return false;
+}
+
+function becomeHost(i) {
+  if (playing) return;
+  if (i >= SLOTS) { setTimeout(() => becomeHost(0), 3000); return; }
+  hostPeer = new Peer(PREFIX + i);
+  hostPeer.on('open', () => { mySlot = i; setStatus('Waiting for an opponent…'); rescanLoop(); });
+  hostPeer.on('error', e => { if (e.type === 'unavailable-id') { hostPeer.destroy(); becomeHost(i + 1); } });
+  hostPeer.on('connection', c => {
+    c.on('data', d => {
+      if (d.type !== 'join') return;
+      if (playing || matching) { c.send({type: 'busy'}); setTimeout(() => c.close(), 500); return; }
+      const hostColor = Math.random() < 0.5 ? 'w' : 'b';
+      c.send({type: 'accept', color: hostColor === 'w' ? 'b' : 'w'});
+      beginGame(c, hostColor);
+    });
+  });
+}
+
+// while waiting as a host, look for hosts in lower slots (avoids two people both waiting)
+async function rescanLoop() {
+  await new Promise(r => setTimeout(r, 4000 + Math.random() * 3000));
+  if (playing || mySlot <= 0) return;
+  matching = true;
+  const found = await scan(mySlot);
+  matching = false;
+  if (found) { try { hostPeer.destroy(); } catch (e) {} return; }
+  rescanLoop();
+}
+
+function start() {
+  render();
+  guestPeer = new Peer();
+  guestPeer.on('error', e => { if (e.type === 'peer-unavailable' && pending) pending.fail(); });
+  guestPeer.on('open', async () => { if (!(await scan(SLOTS))) becomeHost(0); });
+}
+start();
+</script>
+</body>
+</html>
